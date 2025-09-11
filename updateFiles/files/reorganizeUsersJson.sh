@@ -13,26 +13,38 @@ OLD_USER_JSON="/home/kipr/Documents/KISS/users.json"
 NEW_USER_JSON="/home/kipr/Documents/KISS/newUsers.json"
 HOME_DIR="/home/kipr/Documents/KISS"
 SCRIPT_DIR="$(dirname "$0")"
-JQ="$SCRIPT_DIR/pkgs/jq-linux64" #jq-linux64 testing on computer, pkgs/jq-linux-arm64 for pi once ready
-#Get all directories stored in /home/kipr/Documents/KISS - Users
+JQ="../pkgs/jq-linux64" #jq-linux64 testing on computer, pkgs/jq-linux-arm64 for pi once ready
+sudo cp ../pkgs/jq-linux-arm64 /usr/local/bin/jq
+#sudo chmod +x /usr/local/bin/jq
+JQ=/usr/local/bin/jq
+# Get all directories stored in /home/kipr/Documents/KISS - Users
 for dir in "$HOME_DIR"/*; do
     if [ -d "$dir" ]; then
-        echo "User Directory: $dir"
         userName=$(basename "$dir")
-        userPath_array+=(${dir})
-        user_array+=(${userName})
-    elif [ -f "$dir" ]; then
-        echo "File: $dir"
+        
+        # Skip the 'classrooms' folder
+        if [ "$userName" = "classrooms" ]; then
+            continue
+        fi
 
+        userPath_array+=("$dir")
+        user_array+=("$userName")
     fi
 done
 
-echo "user_array: ${user_array[@]}"
-echo "userPath_array: ${userPath_array[@]}"
 
+#New voldigate structure for users.json
 voldigateJson=$(printf '%s\n' "${user_array[@]}" | "$JQ" -Rn '
   [inputs] | reduce .[] as $item ({}; .[$item] = {})
 ')
+
+#Make sure current users.json doesn't have trailing , (v31.1.2)
+perl -pe 's/,\s*}/}/g' /home/kipr/Documents/KISS/users.json \
+  | jq . > /home/kipr/Documents/KISS/users.json.fixed
+
+sudo mv /home/kipr/Documents/KISS/users.json.fixed /home/kipr/Documents/KISS/users.json
+
+echo "Fixed users.json: $(< /home/kipr/Documents/KISS/users.json)"
 
 #Read old users.json to get user interface
 oldUsersJson=$(cat "$OLD_USER_JSON")
@@ -41,7 +53,9 @@ oldUsersJson=$(cat "$OLD_USER_JSON")
 for userPath in "${userPath_array[@]}"; do
     userName=$(basename "$userPath")
     projects_json_list=()
+    userMode=$(echo "$oldUsersJson" | jq -r --arg uname "$userName" '.[$uname].mode')
 
+       echo "oldUsers[$userName].mode: $userMode"
     for projDir in "$userPath"/*; do
         [ -d "$projDir" ] || continue
         projectName=$(basename "$projDir")
@@ -84,7 +98,7 @@ for userPath in "${userPath_array[@]}"; do
         done
 
         if [ ${#includeFiles[@]} -gt 0 ]; then
-            includeJSON=$(printf '%s\n' "${includeFiles[@]}" | "$JQ" -R -s .)
+            includeJSON=$(printf '%s\n' "${includeFiles[@]}" | "$JQ" -R . | "$JQ" -s .)
         else
             includeJSON='[]'
         fi
@@ -96,7 +110,7 @@ for userPath in "${userPath_array[@]}"; do
         fi
 
         if [ ${#dataFiles[@]} -gt 0 ]; then
-            dataJSON=$(printf '%s\n' "${dataFiles[@]}" | "$JQ" -R -s .)
+            dataJSON=$(printf '%s\n' "${dataFiles[@]}" | "$JQ" -R . | "$JQ" -s .)
         else
             dataJSON='[]'
         fi
@@ -116,11 +130,26 @@ for userPath in "${userPath_array[@]}"; do
         dataFolderFiles: $data
     }')
 
+        echo "$project_json" >"$projDir/.project.config.json"
         projects_json_list+=("$project_json")
     done
 
     # Combine all projects into a JSON array
     all_projects_json=$(printf '%s\n' "${projects_json_list[@]}" | "$JQ" -s .)
+
+    #Create .user.config.json that belongs in the User's root folder
+    userConfigJson=$("$JQ" -n \
+        --arg user "$userName" \
+        --argjson projects "$all_projects_json" \
+        --argjson oldUsers "$oldUsersJson" \
+        '{
+            userName: $user,
+            interfaceMode: ($oldUsers[$user].mode // "Simple"),
+            projects: $projects,
+            classroomName: null
+        }')
+
+    echo "$userConfigJson" >"$userPath/.user.config.json"
 
     # Inject into the Voldigate JSON
     voldigateJson=$(
@@ -130,7 +159,7 @@ for userPath in "${userPath_array[@]}"; do
             --argjson projs "$all_projects_json" \
             '.[$user] += {
       userName: $user,
-      interfaceMode: ($oldUsers[$user].mode // "Default"),
+      interfaceMode: ($oldUsers[$user].mode // "Simple"),
       projects: $projs,
       classroomName: null
   }'
@@ -139,7 +168,13 @@ for userPath in "${userPath_array[@]}"; do
 done
 
 # Output final JSON
-echo "$voldigateJson"
+echo "$voldigateJson" >"$NEW_USER_JSON"
 
-exit 1
-
+if [ -f "$NEW_USER_JSON" ]; then
+    echo "Successfully created $NEW_USER_JSON"
+    cat "$NEW_USER_JSON" > "$OLD_USER_JSON"
+    rm "$NEW_USER_JSON"
+else
+    echo "Failed to create $NEW_USER_JSON"
+    exit 1
+fi
